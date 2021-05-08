@@ -1,0 +1,451 @@
+---
+title: "GARCH VaR code"
+author: "Luis"
+date: "08/05/2021"
+output: pdf_document
+---
+
+# VaR-GARCH estimations
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(zoo)
+library(rugarch)
+library(gdata)
+library(tictoc)
+library(parallel)
+#library(wavelets)
+```
+## Unlist code
+
+```{r unlist}
+
+unl<-function(est, n){
+  library(gdata)
+  
+  mat=matrix(0, ncol = length(est), nrow = nrow(est[[1]]) ) 
+  
+  for (i in 1:ncol(mat)) {
+    
+    mat[,i]<-unlist(est[[i]][,n])
+    
+  }
+  
+  resp<-unmatrix(mat, byrow = F)
+  
+  return(as.numeric(resp))
+}
+
+
+```
+## FHS code
+```{r FHS}
+
+FHS<-function(X, spec, sseed){
+  
+  FHS<-ugarchboot(fitORspec = spec, X, method = "Partial",
+                  sampling = "raw", n.ahead = 1,n.bootfit = 10000,
+                  n.bootpred = 10000, out.sample = 0, 
+                  rseed = sseed)
+  
+  
+  VaR5F<-as.numeric(quantile(FHS@fseries,p=0.05))
+  VaR1F<-as.numeric(quantile(FHS@fseries,p=0.01))
+  VaR5tF<-as.numeric(quantile(FHS@fseries,p=0.005))
+  VaR1tF<-as.numeric(quantile(FHS@fseries,p=0.001))
+  
+  ans<-c(VaR5F, VaR1F,VaR5tF, VaR1tF)
+  
+  return(ans)
+}
+
+```
+
+## Estimator code
+
+```{r estimator}
+
+Estimator<-function(X,spec){ 
+  
+  spec1 = spec
+  
+  spec2 = spec
+  
+  ctrl = list(n.restarts = 10,tol = 1e-6)
+  
+  model1<-try(
+    ugarchfit(data = X, spec = spec1, solver = "hybrid",
+              solver.control = ctrl),
+    silent = TRUE
+  )
+  if (class(model1) == "try-error"){
+    model1 <- ugarchfit(data = X, spec = spec1,
+                        solver = "solnp",  #"gosolnp"
+                        solver.control = ctrl)
+  }
+  if (model1@fit$convergence != 0){
+    cat("\n\nProblem here!!\n\n")
+  } 
+  
+  Param<-model1@fit[["coef"]]
+  spec@model[["fixed.pars"]] <- Param
+  
+  res <-          model1@fit$residuals
+  
+  
+  H<-ugarchforecast(model1, X, n.ahead = 1)
+  H_1<-as.numeric(H@forecast$sigmaFor)
+  
+  #sigma<-H@model[["modeldata"]][["sigma"]] #estimated conditional sd.
+  #z<-X/sigma
+  res <- X - mean(X)
+  
+  
+  dis = spec@model[["modeldesc"]][["distribution"]]
+  
+  
+  if(dis =="norm"){
+    
+    Qed = qdist(distribution = dis , mu=0, sigma=1, p=c(0.05, 0.01, 0.005, 0.001))
+    
+    f = function(x) (qdist(distribution = dis, mu=0, sigma=1, p = x))
+    
+  }else if(dis == "snorm"){
+    
+    Qed = qdist(distribution = dis , mu=0, sigma=1, skew = Param["skew"], p=c(0.05, 0.01, 0.005, 0.001))
+    
+    f = function(x) (qdist(distribution = dis, mu=0, sigma=1, p = x, skew = Param["skew"]))
+    
+  }else if(dis=="std" || dis=="ged"){
+    
+    Qed = qdist(distribution = dis , mu=0, sigma=1, shape = Param["shape"], p=c(0.05, 0.01, 0.005, 0.001))
+    
+    f = function(x) (qdist(distribution = dis, mu=0, sigma=1, p = x, shape = Param["shape"]))
+    
+  }else{
+    
+    Qed = qdist(distribution = dis , mu=0, sigma=1, shape = Param["shape"], 
+                skew = Param["skew"], p=c(0.05, 0.01, 0.005, 0.001))
+    
+    f = function(x) (qdist(distribution = dis, mu=0, sigma=1, p = x, skew = Param["skew"], shape = Param["shape"]))
+    
+  }
+  
+  
+  #Parametric VaR: 5%, 1%, 0.5% and 0.1% level of significance:
+  
+  # Considering the shape parameter estimated previously.
+  
+  VaR <- as.numeric(H_1*(Qed))
+  
+  
+  #######################################################################
+  #Empirical VaR - Filtered Historical simulation, 5%, 1%, 0.5% and 0.1%
+  #level of significance:
+  #Bootfit ignored for FHS
+  
+  #FHS1<-FHS(X, spec, sseed = seq(1:10000))
+  
+  #######################################################################
+  
+  #f = function(x) (qdist(distribution = dis, mu=0, sigma=1, p = x, skew = skew, shape=shape))
+  
+  ES5a = H_1*integrate(f, 0, 0.05)$value/0.05
+  
+  ES1a = H_1*integrate(f, 0, 0.01)$value/0.01
+  
+  ES5t = H_1*integrate(f, 0, 0.005)$value/0.005
+  
+  ES1t = H_1*integrate(f, 0, 0.001)$value/0.001
+  
+  #################################################################################
+  
+  ## Wavelets
+  
+  VaR_wav <- unlist(VaR_wavelets2(X, res, spec1, k))
+  
+  
+  ans<-list(
+    
+    VaR5a = VaR[1],
+    VaR1a = VaR[2],
+    VaR5t = VaR[3],
+    VaR1t = VaR[4],
+    
+    
+    ES5a = as.numeric(ES5a),
+    ES1a = as.numeric(ES1a),
+    ES5t = as.numeric(ES5t),
+    ES1t = as.numeric(ES1t),
+    
+    
+    Vol = H_1,
+    
+    VaR5w = VaR_wav[1],
+    VaR1w = VaR_wav[2],
+    VaR5tw = VaR_wav[3],
+    VaR1tw = VaR_wav[4],
+    
+    
+    ES5w = VaR_wav[5],
+    ES1w = VaR_wav[6],
+    ES5tw = VaR_wav[7],
+    ES1tw = VaR_wav[8],
+    
+    Volw = VaR_wav[9]
+    
+    
+    
+  )
+  
+  
+  
+  return(ans)
+
+}
+
+```
+
+```{r, estimatorsA}
+EstimatorA<- function(param, X, model,  dis) {
+  
+  
+  spec = ugarchspec(variance.model = list(model = "sGARCH"),
+                     mean.model=list(armaOrder=c(0,0), include.mean=FALSE),
+                     distribution.model = dis)
+  
+  spec@model[["fixed.pars"]]<-param
+  
+  #One-step-ahead cond. sd. forecast
+  
+  H<-ugarchforecast(spec, X, n.ahead = 1)
+  H_1<-as.numeric(H@forecast$sigmaFor)
+  
+  res <- X - mean(X)
+  
+  #Estimating the shape parameter of a STD or a GED dist.
+  #We set shape=40 for a normal (it does not affect the normal VaR estimation)
+  
+  if(dis=="norm"){
+    shape=40
+  }else{
+    shape=spec@model[["fixed.pars"]][["shape"]]
+  }
+  
+  #Parametric VaR: 5%, 1%, 0.5% and 0.1% level of significance:
+  
+ # Considering the shape parameter estimated previously.
+  
+  
+  Qed = qdist(distribution = dis , mu=0, sigma=1, shape = 7, 
+                 p=c(0.05, 0.01, 0.005, 0.001))
+    
+  f = function(x) (qdist(distribution = dis, mu=0, sigma=1, p = x, shape = 7))
+   
+  ES5a = H_1*integrate(f, 0, 0.05)$value/0.05
+  
+  ES1a = H_1*integrate(f, 0, 0.01)$value/0.01
+  
+  ES5t = H_1*integrate(f, 0, 0.005)$value/0.005
+  
+  ES1t = H_1*integrate(f, 0, 0.001)$value/0.001
+  
+  VaR <- as.numeric(H_1*(Qed))
+  
+  #################################################################################
+  
+  ## Wavelets
+  
+  VaR_wav <- unlist(VaR_wavelets3(X, res, model, k))
+  
+  ans<-list(
+    
+    VaR5a = VaR[1],
+    VaR1a = VaR[2],
+    VaR5t = VaR[3],
+    VaR1t = VaR[4],
+    
+    
+    ES5a = as.numeric(ES5a),
+    ES1a = as.numeric(ES1a),
+    ES5t = as.numeric(ES5t),
+    ES1t = as.numeric(ES1t),
+    
+    
+    Vol = H_1,
+    
+    VaR5w = VaR_wav[1],
+    VaR1w = VaR_wav[2],
+    VaR5tw = VaR_wav[3],
+    VaR1tw = VaR_wav[4],
+    
+    
+    ES5w = VaR_wav[5],
+    ES1w = VaR_wav[6],
+    ES5tw = VaR_wav[7],
+    ES1tw = VaR_wav[8],
+    
+    Volw = VaR_wav[9]
+    
+  )
+  
+  return(ans)
+  
+  }
+
+```
+## Rolling window forecast code
+
+```{r rolling window}
+
+rollF<-function(X, spec){
+  
+  roll<-rollapply(X, w, function(X)(Estimator(X, spec = spec)))
+
+return(roll)
+
+}
+```
+## Data
+
+```{r data}
+
+
+
+```
+## Models Specification
+
+```{r}
+
+#"eGARCH"
+
+models <- c("sGARCH","eGARCH","gjrGARCH")
+distributions <- c("norm", "std", "ged", "sstd", "sged")
+
+spec.comp <- list()
+for( m in models ) {
+  for( d in distributions ) {
+    spec.comp[[paste( m, d, sep = "_" )]] <- ugarchspec(mean.model = list(armaOrder = c(0, 0), include.mean = FALSE), 
+                 variance.model = list(model = m, garchOrder = c(1, 1)),
+                 distribution.model=d)
+  }
+}
+specifications <- names( spec.comp )
+
+
+estimates <- vector(mode="list", length = 19)
+names(estimates) <- c(specifications, "NGQML", "Rank", "RankB", "Prem")
+
+
+
+
+```
+
+
+## Estimation
+
+```{r estimation}
+
+
+
+cluster = makeCluster(3)
+
+clusterEvalQ(cluster, library(rugarch))
+
+clusterExport(cluster, c("spec.comp", "Estimator","X", "rollF","rollapply","w","estimates", "k", "OutlierDetection", "OutlierFiltering", "VaR_wavelets2"))
+
+tic()
+estimates[[1]]<-parApply(cluster, X, 2, function(X)(rollF(X, spec.comp[[1]]))) 
+toc()
+save.image("C:/Users/id8217/VaR/Bitcoin/Bitcoin_VaR.RData")
+
+tic()
+estimates[[2]] <- parApply(cluster, X, 2, function(X)(rollF(X, spec.comp[[2]]))) 
+toc()   
+save.image("C:/Users/id8217/VaR/Bitcoin/Bitcoin_VaR.RData")
+
+tic() 
+estimates[[3]]<-parApply(cluster, X, 2, function(X)(rollF(X, spec.comp[[3]]))) 
+toc()   
+save.image("C:/Users/id8217/VaR/Bitcoin/Bitcoin_VaR.RData")
+
+tic() 
+estimates[[4]]<-parApply(cluster, X, 2, function(X)(rollF(X, spec.comp[[4]]))) 
+toc()   
+save.image("C:/Users/id8217/VaR/Bitcoin/Bitcoin_VaR.RData")
+
+tic() 
+estimates[[5]]<-parApply(cluster, X, 2, function(X)(rollF(X, spec.comp[[5]]))) 
+toc()   
+save.image("C:/Users/id8217/VaR/Bitcoin/Bitcoin_VaR.RData")
+
+tic() 
+estimates[[6]]<-parApply(cluster, X, 2, function(X)(rollF(X, spec.comp[[6]])))
+toc()   
+save.image("C:/Users/id8217/VaR/Bitcoin/Bitcoin_VaR.RData")
+
+tic() 
+estimates[[7]]<-parApply(cluster, X, 2, function(X)(rollF(X, spec.comp[[7]]))) 
+toc()   
+save.image("C:/Users/id8217/VaR/Bitcoin/Bitcoin_VaR.RData")
+
+tic() 
+estimates[[8]]<-parApply(cluster, X, 2, function(X)(rollF(X, spec.comp[[8]]))) 
+toc()   
+save.image("C:/Users/id8217/VaR/Bitcoin/Bitcoin_VaR.RData")
+
+tic() 
+estimates[[9]]<-parApply(cluster, X, 2, function(X)(rollF(X, spec.comp[[9]]))) 
+toc()   
+save.image("C:/Users/id8217/VaR/Bitcoin/Bitcoin_VaR.RData")
+
+tic() 
+estimates[[10]]<-parApply(cluster, X, 2, function(X)(rollF(X, spec.comp[[10]]))) 
+toc()   
+save.image("C:/Users/id8217/VaR/Bitcoin/Bitcoin_VaR.RData")
+
+tic() 
+estimates[[11]]<-parApply(cluster, X, 2, function(X)(rollF(X, spec.comp[[11]]))) 
+toc()   
+save.image("C:/Users/id8217/VaR/Bitcoin/Bitcoin_VaR.RData")
+
+tic() 
+estimates[[12]]<-parApply(cluster, X, 2, function(X)(rollF(X, spec.comp[[12]]))) 
+toc()   
+save.image("C:/Users/id8217/VaR/Bitcoin/Bitcoin_VaR.RData")
+
+tic() 
+estimates[[13]]<-parApply(cluster, X, 2, function(X)(rollF(X, spec.comp[[13]])))
+toc() 
+save.image("C:/Users/id8217/VaR/Bitcoin/Bitcoin_VaR.RData")
+
+tic() 
+estimates[[14]]<-parApply(cluster, X, 2, function(X)(rollF(X, spec.comp[[14]]))) 
+toc()   
+save.image("C:/Users/id8217/VaR/Bitcoin/Bitcoin_VaR.RData")
+
+tic() 
+estimates[[15]]<-parApply(cluster, X, 2, function(X)(rollF(X, spec.comp[[15]]))) 
+toc()   
+save.image("C:/Users/id8217/VaR/Bitcoin/Bitcoin_VaR.RData")
+
+tic()
+estimates[[16]]<-parApply(cl, X, 2,function(X)(rollapply(X, w,function(X)(EstimatorA(NGQML_f(X),X, "NGQML", "std")))))
+toc()
+
+tic()
+estimates[[17]]<-parApply(cl, X, 2,function(X)(rollapply(X, w,function(X)(EstimatorA(Rank_f(X),X,"Rank", "std")))))
+toc()
+   
+tic()
+estimates[[18]]<-parApply(cl, X, 2,function(X)(rollapply(X, w,function(X)(EstimatorA(Rank_B(X),X, "RankB", "std")))))
+toc()
+   
+tic()
+estimates[[20]]<-parApply(cl, X, 2,function(X)(rollapply(X, w,function(X)(EstimatorA(Prem_f1(X),X, "Prem", "std")))))
+toc()
+
+stopCluster(cluster)
+
+```
+

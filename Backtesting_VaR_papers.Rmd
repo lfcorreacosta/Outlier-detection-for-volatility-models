@@ -1,0 +1,280 @@
+---
+pdf_document: default
+author: "Luis Fernando C Costa"
+date: "08/05/2021"
+output: github_document
+title: " VaR Backtest - Methods Comparison "
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(GAS)
+library(rugarch)
+library(knitr)
+library(kableExtra)
+library(gdata)
+library(xts)
+library(zoo)
+
+```
+
+# VaR Backtesting functions and tables creation
+
+
+```{r}
+
+no_simulations=32
+
+
+unl<-function(est, n){
+  library(gdata)
+  
+  mat=matrix(0, ncol = no_simulations, nrow = nrow(est[[1]]) ) 
+  
+  for (i in 1:ncol(mat)) {
+    
+    mat[,i]<-unlist(est[[i]][,n])
+    
+  }
+  
+  resp<-unmatrix(mat, byrow = F)
+  
+  return(resp)
+}
+
+
+```
+
+
+### VaR forecast extraction function
+
+This function extract the corresponding VaR levels:
+For 1%VaR m=2 for GARCH and 
+
+```{r, eval=TRUE, echo=TRUE}
+
+#rm(h_G, h_st, h_GED, h_NG, h_Rank, h_RankB, h_P,cl, ind, a  )
+
+
+
+VaRp<-function(Estimators, m){
+  
+  Est <- vector(mode = "list", length = length(Estimators))
+ 
+  
+  for (i in 1:length(Estimators)) {
+    
+    Est[[i]] <- unl(Estimators[[i]],m)
+    
+  }
+  
+   names(Est)<-names(Estimators)
+  
+  return(Est)
+  
+}
+
+```
+
+
+```{r}
+
+BK<-function(rea, VaR, alpha){
+  
+BBg1<-BacktestVaR(rea, VaR, alpha = alpha)
+
+ans<-c(BBg1$LRuc[[2]], BBg1$LRcc[[2]], BBg1$DQ[[2]], BBg1$AE, BBg1$AD[1], BBg1$AD[2])
+
+names(ans)<-c("LRuc", "LRcc", "DQ","Exceed", "ADmed", "ADmax")
+
+return(ans)
+}
+
+
+
+BE <- function(rea, ES, VaR, alpha){
+  
+ESs <- ESTest(alpha = alpha, rea, ES, VaR, boot = TRUE)
+
+ans <- c(ESs$p.value, ESs$Decision)
+names(ans) <- c("pvalue", "decision")
+
+return(ans)
+
+}
+
+
+FZL <- function(rea, VaR, ES, alpha){
+  
+  fz <- FZLoss(data = rea, VaR = VaR, ES = ES, alpha = alpha)
+  a <- mean(fz)
+  
+  return(a)
+  
+  }
+
+
+
+
+```
+
+
+```{r}
+
+
+
+BM <- function(rea, VaR, ES, alpha){
+  
+   VaRi <- cbind(rea,matrix(unlist(VaR), ncol = length(VaR), nrow = length(rea) ))
+   colnames(VaRi)<- c("rea", names(VaR))
+   
+   ESi <- cbind(rea,matrix(unlist(ES), ncol = length(ES), nrow = length(rea) ))
+   colnames(ESi)<- c("rea", names(ES))
+   
+   
+   VaRi<-window(VaRi, start = start, end = end)
+   rea0 <- VaRi[,1]
+   VaRi<-VaRi[,-1]
+   
+   
+   ESi<-window(ESi, start = start, end = end)
+   rea1 <- ESi[,1]
+   ESi<-ESi[,-1]
+
+   ans <- matrix(0, nrow = ncol(VaRi), ncol = 6)  
+   
+   for(i in 1:ncol(VaRi)){
+  
+   ans[i,] <- BK(rea0, VaRi[,i], alpha = alpha)
+  
+   }
+   
+   ans2 <- matrix(0, nrow = ncol(ESi), ncol = 2)  
+   
+   for(i in 1:ncol(VaRi)){
+  
+   ans2[i,] <- BE(rea1, ESi[,i], VaRi[,i], alpha = alpha)
+  
+  
+   }
+   
+   ans3 <- array(0, length(VaR))
+   
+   for(i in 1:ncol(VaRi)){
+  
+   ans3[i] <- FZL(rea0, VaRi[,i], ESi[,i], alpha)
+  
+   }
+   
+   FZ <- format(round(ans3,3),nsmall = 3, scientific = FALSE)
+   rownames(FZ)<-names(VaR)
+   FZ1<-FZ[order(FZ)]
+   
+   fz <- list(FZ0 = FZ, FZ = FZ1)
+   
+   
+   
+  BT<- format(round(ans,3),nsmall = 3, scientific = FALSE)
+  colnames(BT)<-c("LRuc", "LRcc", "DQ","A/E", "ADmed", "ADmax")
+  rownames(BT)<-names(VaR)
+ 
+  BEs <- cbind(format(round(as.numeric(ans2[,1]),3),nsmall = 3, scientific = FALSE), ans2[,2])
+  colnames(BEs)<-c("pvalue", "decision")
+  rownames(BEs)<-names(ES)
+  
+  result <- list(BT, BEs, FZ = fz, VaR = VaRi, ES = ESi)
+  
+  return(result)
+  
+  
+}
+
+
+```
+
+## Covid-19 2020
+
+```{r}
+
+rea<-ans$rea
+#Estimators2<-Models$Models_Cov19$GARCH
+
+
+Estimators<-estimates
+
+start = "2020-01-01"
+end = "2020-05-30" #Sys.Date()
+
+rea<-ans$rea
+
+plot(window(rea, start = start, end = end))
+
+
+VaR1a <-VaRp(Estimators = Estimators, 2)
+ES1a <- VaRp(Estimators = Estimators, 6) 
+
+VaR1w <-VaRp(Estimators = Estimators, 11)
+names(VaR1w)<-paste(names(VaR1a), "wav",sep = "-")
+
+ES1w <- VaRp(Estimators = Estimators, 15) 
+names(ES1w)<-paste(names(ES1a), "wav",sep = "-")
+
+VaR1_t <- c(VaR1a, VaR1w)
+ES1_t <- c(ES1a, ES1w)
+
+
+CV20a <- BM(rea, VaR1a, ES1a, alpha= 0.01)
+CV20w <- BM(rea, VaR1w, ES1w, alpha= 0.01)
+
+FZcov <- c(CV20a$FZ$FZ, CV20w$FZ$FZ)[order(c(CV20a$FZ$FZ, CV20w$FZ$FZ))]
+FZcov[1:10]
+
+
+Tables_Testes_CV20<- list(
+
+LRuc = tables_paper(CV20a, CV20w, stati = 1)[[1]],
+
+LRcc = tables_paper(CV20a, CV20w, stati = 2)[[1]],
+
+DQ = tables_paper(CV20a, CV20w, stati = 3)[[1]],
+
+Loss = tables_paper(CV20a, CV20w, stati = 1)[[2]]
+
+)
+View(Tables_Testes_CV20$Loss)
+
+```
+
+
+```{r}
+
+mcs <- MCS$ans
+
+kable(mcs,  caption = "Model Confidence Set for 1%-VaR forecasts of Down Jones",
+booktabs = T)%>%
+kable_styling("striped")
+
+
+kable(Tables_Testes_CV20$LRuc, caption = "Unconditional Coverage (UC) test p-values for 1%-VaR forecasts of Down Jones",
+booktabs = T)%>%
+kable_styling("striped")
+
+kable(Tables_Testes_CV20$LRcc, caption = "Conditional Coverage (CC) test p-values for 1%-VaR forecasts of Down Jones",
+booktabs = T)%>%
+kable_styling("striped")
+
+kable(Tables_Testes_CV20$DQ, caption = "Dynamic Quantile (DQ) test p-values for 1%-VaR forecasts of Down Jones",
+booktabs = T)%>%
+kable_styling("striped")
+
+
+kable(Tables_Testes_CV20$Loss,  caption = "Dow Jones - Loss functions", booktabs = T)%>%
+kable_styling("striped")
+
+
+
+
+
+
+```
+
